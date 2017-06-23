@@ -3,7 +3,8 @@
 // This code is public domain
 // (but note, once linked against the led-matrix library, this is
 // covered by the GPL v2)
-
+//
+// This is a grab-bag of various demos and not very readable.
 #include "led-matrix.h"
 #include "threaded-canvas-manipulator.h"
 #include "transformer.h"
@@ -13,15 +14,25 @@
 #include <getopt.h>
 #include <limits.h>
 #include <math.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+
 #include <algorithm>
 
 using std::min;
 using std::max;
 
+#define TERM_ERR  "\033[1;31m"
+#define TERM_NORM "\033[0m"
+
 using namespace rgb_matrix;
+
+volatile bool interrupt_received = false;
+static void InterruptHandler(int signo) {
+  interrupt_received = true;
+}
 
 /*
  * The following are demo image generators. They all use the utility
@@ -36,7 +47,7 @@ public:
   }
   void Run() {
     uint32_t continuum = 0;
-    while (running()) {
+    while (running() && !interrupt_received) {
       usleep(5 * 1000);
       continuum += 1;
       continuum %= 3 * 255;
@@ -54,7 +65,7 @@ public:
         g = 255 - c;
         b = c;
       }
-      matrix_->transformer()->Transform(off_screen_canvas_)->Fill(r, g, b);
+      off_screen_canvas_->Fill(r, g, b);
       off_screen_canvas_ = matrix_->SwapOnVSync(off_screen_canvas_);
     }
   }
@@ -67,13 +78,14 @@ private:
 // Simple generator that pulses through brightness on red, green, blue and white
 class BrightnessPulseGenerator : public ThreadedCanvasManipulator {
 public:
-  BrightnessPulseGenerator(RGBMatrix *m) : ThreadedCanvasManipulator(m), matrix_(m) {}
+  BrightnessPulseGenerator(RGBMatrix *m)
+    : ThreadedCanvasManipulator(m), matrix_(m) {}
   void Run() {
     const uint8_t max_brightness = matrix_->brightness();
     const uint8_t c = 255;
     uint8_t count = 0;
 
-    while (running()) {
+    while (running() && !interrupt_received) {
       if (matrix_->brightness() < 1) {
         matrix_->SetBrightness(max_brightness);
         count++;
@@ -82,10 +94,10 @@ public:
       }
 
       switch (count % 4) {
-        case 0: matrix_->Fill(c, 0, 0); break;
-        case 1: matrix_->Fill(0, c, 0); break;
-        case 2: matrix_->Fill(0, 0, c); break;
-        case 3: matrix_->Fill(c, c, c); break;
+      case 0: matrix_->Fill(c, 0, 0); break;
+      case 1: matrix_->Fill(0, c, 0); break;
+      case 2: matrix_->Fill(0, 0, c); break;
+      case 3: matrix_->Fill(c, c, c); break;
       }
 
       usleep(20 * 1000);
@@ -124,7 +136,7 @@ public:
     const int x_step = max(1, width / sub_blocks);
     const int y_step = max(1, height / sub_blocks);
     uint8_t count = 0;
-    while (running()) {
+    while (running() && !interrupt_received) {
       for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
           int c = sub_blocks * (y / y_step) + x / x_step;
@@ -171,7 +183,7 @@ public:
 
     const float deg_to_rad = 2 * 3.14159265 / 360;
     int rotation = 0;
-    while (running()) {
+    while (running() && !interrupt_received) {
       ++rotation;
       usleep(15 * 1000);
       rotation %= 360;
@@ -212,7 +224,7 @@ public:
       scroll_ms_(scroll_ms),
       horizontal_position_(0),
       matrix_(m) {
-      offscreen_ = matrix_->CreateFrameCanvas();
+    offscreen_ = matrix_->CreateFrameCanvas();
   }
 
   virtual ~ImageScroller() {
@@ -267,9 +279,9 @@ public:
   }
 
   void Run() {
-    const int screen_height = matrix_->transformer()->Transform(offscreen_)->height();
-    const int screen_width = matrix_->transformer()->Transform(offscreen_)->width();
-    while (running()) {
+    const int screen_height = offscreen_->height();
+    const int screen_width = offscreen_->width();
+    while (running() && !interrupt_received) {
       {
         MutexLock l(&mutex_new_image_);
         if (new_image_.IsValid()) {
@@ -285,8 +297,8 @@ public:
       for (int x = 0; x < screen_width; ++x) {
         for (int y = 0; y < screen_height; ++y) {
           const Pixel &p = current_image_.getPixel(
-                     (horizontal_position_ + x) % current_image_.width, y);
-          matrix_->transformer()->Transform(offscreen_)->SetPixel(x, y, p.red, p.green, p.blue);
+            (horizontal_position_ + x) % current_image_.width, y);
+          offscreen_->SetPixel(x, y, p.red, p.green, p.blue);
         }
       }
       offscreen_ = matrix_->SwapOnVSync(offscreen_);
@@ -341,7 +353,7 @@ private:
   // Current image is only manipulated in our thread.
   Image current_image_;
 
-  // New image can be loaded from another thread, then taken over in main thread.
+  // New image can be loaded from another thread, then taken over in main thread
   Mutex mutex_new_image_;
   Image new_image_;
 
@@ -392,7 +404,7 @@ public:
   }
 
   void Run() {
-    while (running()) {
+    while (running() && !interrupt_received) {
       // Drop a sand grain in the centre
       values_[width_/2][height_/2]++;
       updateValues();
@@ -400,20 +412,20 @@ public:
       for (int x=0; x<width_; ++x) {
         for (int y=0; y<height_; ++y) {
           switch (values_[x][y]) {
-            case 0:
-              canvas()->SetPixel(x, y, 0, 0, 0);
-              break;
-            case 1:
-              canvas()->SetPixel(x, y, 0, 0, 200);
-              break;
-            case 2:
-              canvas()->SetPixel(x, y, 0, 200, 0);
-              break;
-            case 3:
-              canvas()->SetPixel(x, y, 150, 100, 0);
-              break;
-            default:
-              canvas()->SetPixel(x, y, 200, 0, 0);
+          case 0:
+            canvas()->SetPixel(x, y, 0, 0, 0);
+            break;
+          case 1:
+            canvas()->SetPixel(x, y, 0, 0, 200);
+            break;
+          case 2:
+            canvas()->SetPixel(x, y, 0, 200, 0);
+            break;
+          case 3:
+            canvas()->SetPixel(x, y, 150, 100, 0);
+            break;
+          default:
+            canvas()->SetPixel(x, y, 200, 0, 0);
           }
         }
       }
@@ -496,15 +508,15 @@ public:
     if (r_<150 && g_<150 && b_<150) {
       int c = rand()%3;
       switch (c) {
-        case 0:
-          r_ = 200;
-          break;
-        case 1:
-          g_ = 200;
-          break;
-        case 2:
-          b_ = 200;
-          break;
+      case 0:
+        r_ = 200;
+        break;
+      case 1:
+        g_ = 200;
+        break;
+      case 2:
+        b_ = 200;
+        break;
       }
     }
   }
@@ -521,7 +533,7 @@ public:
   }
 
   void Run() {
-    while (running()) {
+    while (running() && !interrupt_received) {
 
       updateValues();
 
@@ -650,35 +662,35 @@ public:
       }
     }
 
-    while (running()) {
+    while (running() && !interrupt_received) {
       // LLRR
       switch (values_[antX_][antY_]) {
-        case 0:
-        case 1:
-          antDir_ = (antDir_+1+4) % 4;
-          break;
-        case 2:
-        case 3:
-          antDir_ = (antDir_-1+4) % 4;
-          break;
+      case 0:
+      case 1:
+        antDir_ = (antDir_+1+4) % 4;
+        break;
+      case 2:
+      case 3:
+        antDir_ = (antDir_-1+4) % 4;
+        break;
       }
 
       values_[antX_][antY_] = (values_[antX_][antY_] + 1) % numColors_;
       int oldX = antX_;
       int oldY = antY_;
       switch (antDir_) {
-        case 0:
-          antX_++;
-          break;
-        case 1:
-          antY_++;
-          break;
-        case 2:
-          antX_--;
-          break;
-        case 3:
-          antY_--;
-          break;
+      case 0:
+        antX_++;
+        break;
+      case 1:
+        antY_++;
+        break;
+      case 2:
+        antX_--;
+        break;
+      case 3:
+        antY_--;
+        break;
       }
       updatePixel(oldX, oldY);
       if (antX_ < 0 || antX_ >= width_ || antY_ < 0 || antY_ >= height_)
@@ -691,18 +703,18 @@ public:
 private:
   void updatePixel(int x, int y) {
     switch (values_[x][y]) {
-      case 0:
-        canvas()->SetPixel(x, y, 200, 0, 0);
-        break;
-      case 1:
-        canvas()->SetPixel(x, y, 0, 200, 0);
-        break;
-      case 2:
-        canvas()->SetPixel(x, y, 0, 0, 200);
-        break;
-      case 3:
-        canvas()->SetPixel(x, y, 150, 100, 0);
-        break;
+    case 0:
+      canvas()->SetPixel(x, y, 200, 0, 0);
+      break;
+    case 1:
+      canvas()->SetPixel(x, y, 0, 200, 0);
+      break;
+    case 2:
+      canvas()->SetPixel(x, y, 0, 0, 200);
+      break;
+    case 3:
+      canvas()->SetPixel(x, y, 150, 100, 0);
+      break;
     }
     if (x == antX_ && y == antY_)
       canvas()->SetPixel(x, y, 0, 0, 0);
@@ -762,7 +774,7 @@ public:
     }
 
     // Start the loop
-    while (running()) {
+    while (running() && !interrupt_received) {
       if (t_ % 8 == 0) {
         // Change the means
         for (int i=0; i<numBars_; ++i) {
@@ -809,8 +821,8 @@ public:
   }
 
 private:
-  void drawBarRow(int bar, uint8_t y, uint8_t r, uint8_t g, uint8_t b) {
-    for (uint8_t x=bar*barWidth_; x<(bar+1)*barWidth_; ++x) {
+  void drawBarRow(int bar, int y, uint8_t r, uint8_t g, uint8_t b) {
+    for (int x=bar*barWidth_; x<(bar+1)*barWidth_; ++x) {
       canvas()->SetPixel(x, height_-1-y, r, g, b);
     }
   }
@@ -862,7 +874,7 @@ public:
       children_[i].dna = rand() & 0xFFFFFF;
     }
 
-    while(running()) {
+    while (running() && !interrupt_received) {
       swap();
       sort();
       mate();
@@ -989,9 +1001,9 @@ private:
   bool is85PercentFit() {
     int numFit = 0;
     for (int i = 0; i < popSize_; ++i) {
-        if (calcFitness(children_[i].dna, target_) < 1) {
-            ++numFit;
-        }
+      if (calcFitness(children_[i].dna, target_) < 1) {
+        ++numFit;
+      }
     }
     return ((numFit / (float)popSize_) > 0.85f);
   }
@@ -1008,24 +1020,18 @@ private:
 static int usage(const char *progname) {
   fprintf(stderr, "usage: %s <options> -D <demo-nr> [optional parameter]\n",
           progname);
-  fprintf(stderr, "Options:\n"
-          "\t-r <rows>     : Panel rows. '16' for 16x32 (1:8 multiplexing),\n"
-	  "\t                '32' for 32x32 (1:16), '8' for 1:4 multiplexing; 64 for 1:32 multiplexing. "
-          "Default: 32\n"
-          "\t-P <parallel> : For Plus-models or RPi2: parallel chains. 1..3. "
-          "Default: 1\n"
-          "\t-c <chained>  : Daisy-chained boards. Default: 1.\n"
-          "\t-L            : 'Large' display, composed out of 4 times 32x32\n"
-          "\t-p <pwm-bits> : Bits used for PWM. Something between 1..11\n"
-          "\t-l            : Don't do luminance correction (CIE1931)\n"
-          "\t-D <demo-nr>  : Always needs to be set\n"
-          "\t-d            : run as daemon. Use this when starting in\n"
-          "\t                /etc/init.d, but also when running without\n"
-          "\t                terminal (e.g. cron).\n"
-          "\t-t <seconds>  : Run for these number of seconds, then exit.\n"
-          "\t                (if neither -d nor -t are supplied, waits for <RETURN>)\n"
-          "\t-b <brightnes>: Sets brightness percent. Default: 100.\n"
-          "\t-R <rotation> : Sets the rotation of matrix. Allowed: 0, 90, 180, 270. Default: 0.\n");
+  fprintf(stderr, "Options:\n");
+  fprintf(stderr,
+          "\t-D <demo-nr>              : Always needs to be set\n"
+          "\t-L                        : Large display, in which each chain is 'folded down'\n"
+          "\t                            in the middle in an U-arrangement to get more vertical space.\n"
+          "\t-R <rotation>             : Sets the rotation of matrix. "
+          "Allowed: 0, 90, 180, 270. Default: 0.\n"
+          "\t-t <seconds>              : Run for these number of seconds, then exit.\n");
+
+
+  rgb_matrix::PrintMatrixFlags(stderr);
+
   fprintf(stderr, "Demos, choosen with -D\n");
   fprintf(stderr, "\t0  - some rotating square\n"
           "\t1  - forward scrolling an image (-m <scroll-ms>)\n"
@@ -1045,74 +1051,78 @@ static int usage(const char *progname) {
 }
 
 int main(int argc, char *argv[]) {
-  GPIO io;
-  bool as_daemon = false;
   int runtime_seconds = -1;
   int demo = -1;
-  int rows = 32;
-  int chain = 1;
-  int parallel = 1;
   int scroll_ms = 30;
-  int pwm_bits = -1;
-  int brightness = 100;
   int rotation = 0;
   bool large_display = false;
-  bool do_luminance_correct = true;
 
   const char *demo_parameter = NULL;
+  RGBMatrix::Options matrix_options;
+  rgb_matrix::RuntimeOptions runtime_opt;
+
+  // These are the defaults when no command-line flags are given.
+  matrix_options.rows = 32;
+  matrix_options.chain_length = 1;
+  matrix_options.parallel = 1;
+
+  // First things first: extract the command line flags that contain
+  // relevant matrix options.
+  if (!ParseOptionsFromFlags(&argc, &argv, &matrix_options, &runtime_opt)) {
+    return usage(argv[0]);
+  }
 
   int opt;
-  while ((opt = getopt(argc, argv, "dlD:t:r:P:c:p:b:m:LR:")) != -1) {
+  while ((opt = getopt(argc, argv, "dD:t:r:P:c:p:b:m:LR:")) != -1) {
     switch (opt) {
     case 'D':
       demo = atoi(optarg);
-      break;
-
-    case 'd':
-      as_daemon = true;
       break;
 
     case 't':
       runtime_seconds = atoi(optarg);
       break;
 
-    case 'r':
-      rows = atoi(optarg);
-      break;
-
-    case 'P':
-      parallel = atoi(optarg);
-      break;
-
-    case 'c':
-      chain = atoi(optarg);
-      break;
-
     case 'm':
       scroll_ms = atoi(optarg);
       break;
 
-    case 'p':
-      pwm_bits = atoi(optarg);
-      break;
-
-    case 'b':
-      brightness = atoi(optarg);
-      break;
-
-    case 'l':
-      do_luminance_correct = !do_luminance_correct;
+    case 'R':
+      rotation = atoi(optarg);
       break;
 
     case 'L':
-      // The 'large' display assumes a chain of four displays with 32x32
-      chain = 4;
-      rows = 32;
+      if (matrix_options.chain_length == 1) {
+        // If this is still default, force the 64x64 arrangement.
+        matrix_options.chain_length = 4;
+      }
       large_display = true;
       break;
 
-    case 'R':
-      rotation = atoi(optarg);
+      // These used to be options we understood, but deprecated now. Accept
+      // but don't mention in usage()
+    case 'd':
+      runtime_opt.daemon = 1;
+      break;
+
+    case 'r':
+      matrix_options.rows = atoi(optarg);
+      break;
+
+    case 'P':
+      matrix_options.parallel = atoi(optarg);
+      break;
+
+    case 'c':
+      matrix_options.chain_length = atoi(optarg);
+      break;
+
+    case 'p':
+      matrix_options.pwm_bits = atoi(optarg);
+      break;
+
+    case 'b':
+      matrix_options.brightness = atoi(optarg);
       break;
 
     default: /* '?' */
@@ -1125,77 +1135,33 @@ int main(int argc, char *argv[]) {
   }
 
   if (demo < 0) {
-    fprintf(stderr, "Expected required option -D <demo>\n");
+    fprintf(stderr, TERM_ERR "Expected required option -D <demo>\n" TERM_NORM);
     return usage(argv[0]);
   }
 
-  if (getuid() != 0) {
-    fprintf(stderr, "Must run as root to be able to access /dev/mem\n"
-            "Prepend 'sudo' to the command:\n\tsudo %s ...\n", argv[0]);
-    return 1;
-  }
-
-  if (rows != 8 && rows != 16 && rows != 32 && rows != 64) {
-    fprintf(stderr, "Rows can one of 8, 16, 32 or 64 "
-            "for 1:4, 1:8, 1:16 and 1:32 multiplexing respectively.\n");
-    return 1;
-  }
-
-  if (chain < 1) {
-    fprintf(stderr, "Chain outside usable range\n");
-    return 1;
-  }
-  if (chain > 8) {
-    fprintf(stderr, "That is a long chain. Expect some flicker.\n");
-  }
-  if (parallel < 1 || parallel > 3) {
-    fprintf(stderr, "Parallel outside usable range.\n");
-    return 1;
-  }
-
-  if (brightness < 1 || brightness > 100) {
-    fprintf(stderr, "Brightness is outside usable range.\n");
-    return 1;
-  }
-
   if (rotation % 90 != 0) {
-    fprintf(stderr, "Rotation %d not allowed! Only 0, 90, 180 and 270 are possible.\n", rotation);
+    fprintf(stderr, TERM_ERR "Rotation %d not allowed! "
+            "Only 0, 90, 180 and 270 are possible.\n" TERM_NORM, rotation);
     return 1;
   }
 
-  // Initialize GPIO pins. This might fail when we don't have permissions.
-  if (!io.Init())
+  RGBMatrix *matrix = CreateMatrixFromOptions(matrix_options, runtime_opt);
+  if (matrix == NULL)
     return 1;
-
-  // Start daemon before we start any threads.
-  if (as_daemon) {
-    if (fork() != 0)
-      return 0;
-    close(STDIN_FILENO);
-    close(STDOUT_FILENO);
-    close(STDERR_FILENO);
-  }
-
-  // The matrix, our 'frame buffer' and display updater.
-  RGBMatrix *matrix = new RGBMatrix(&io, rows, chain, parallel);
-  matrix->set_luminance_correct(do_luminance_correct);
-  matrix->SetBrightness(brightness);
-  if (pwm_bits >= 0 && !matrix->SetPWMBits(pwm_bits)) {
-    fprintf(stderr, "Invalid range of pwm-bits\n");
-    return 1;
-  }
-
-  LinkedTransformer *transformer = new LinkedTransformer();
-  matrix->SetTransformer(transformer);
 
   if (large_display) {
-    // Mapping the coordinates of a 32x128 display mapped to a square of 64x64
-    transformer->AddTransformer(new LargeSquare64x64Transformer());
+    // Mapping the coordinates of a 32x128 display mapped to a square of 64x64.
+    // Or any other U-arrangement.
+    matrix->ApplyStaticTransformer(UArrangementTransformer(
+                                     matrix_options.parallel));
   }
 
   if (rotation > 0) {
-    transformer->AddTransformer(new RotateTransformer(rotation));
+    matrix->ApplyStaticTransformer(RotateTransformer(rotation));
   }
+
+  printf("Size: %dx%d. Hardware gpio mapping: %s\n",
+         matrix->width(), matrix->height(), matrix_options.hardware_mapping);
 
   Canvas *canvas = matrix;
 
@@ -1262,28 +1228,33 @@ int main(int argc, char *argv[]) {
   if (image_gen == NULL)
     return usage(argv[0]);
 
+  // Set up an interrupt handler to be able to stop animations while they go
+  // on. Note, each demo tests for while (running() && !interrupt_received) {},
+  // so they exit as soon as they get a signal.
+  signal(SIGTERM, InterruptHandler);
+  signal(SIGINT, InterruptHandler);
+
   // Image generating demo is crated. Now start the thread.
   image_gen->Start();
 
-  // Now, the image genreation runs in the background. We can do arbitrary
+  // Now, the image generation runs in the background. We can do arbitrary
   // things here in parallel. In this demo, we're essentially just
   // waiting for one of the conditions to exit.
-  if (as_daemon) {
-    sleep(runtime_seconds > 0 ? runtime_seconds : INT_MAX);
-  } else if (runtime_seconds > 0) {
+  if (runtime_seconds > 0) {
     sleep(runtime_seconds);
   } else {
-    // Things are set up. Just wait for <RETURN> to be pressed.
-    printf("Press <RETURN> to exit and reset LEDs\n");
-    getchar();
+    // The
+    printf("Press <CTRL-C> to exit and reset LEDs\n");
+    while (!interrupt_received) {
+      sleep(1); // Time doesn't really matter. The syscall will be interrupted.
+    }
   }
 
-  // Stop image generating thread.
+  // Stop image generating thread. The delete triggers
   delete image_gen;
   delete canvas;
 
-  transformer->DeleteTransformers();
-  delete transformer;
-
+  printf("\%s. Exiting.\n",
+         interrupt_received ? "Received CTRL-C" : "Timeout reached");
   return 0;
 }

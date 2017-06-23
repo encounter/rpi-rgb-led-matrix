@@ -28,8 +28,9 @@ typedef uint32_t rowbitmap_t;
 
 namespace rgb_matrix {
 struct Font::Glyph {
+  int device_width, device_height;
   int width, height;
-  int y_offset;
+  int x_offset,y_offset;
   rowbitmap_t bitmap[0];  // contains 'height' elements.
 };
 
@@ -53,7 +54,7 @@ bool Font::LoadFont(const char *path) {
   Glyph tmp;
   Glyph *current_glyph = NULL;
   int row = 0;
-  int x_offset = 0;
+
   int bitmap_shift = 0;
   while (fgets(buffer, sizeof(buffer), f)) {
     if (sscanf(buffer, "FONTBOUNDINGBOX %d %d %d %d",
@@ -63,15 +64,20 @@ bool Font::LoadFont(const char *path) {
     else if (sscanf(buffer, "ENCODING %ud", &codepoint) == 1) {
       // parsed.
     }
+    else if (sscanf(buffer, "DWIDTH %d %d", &tmp.device_width, &tmp.device_height
+                    ) == 2) {
+      // parsed.
+    }
     else if (sscanf(buffer, "BBX %d %d %d %d", &tmp.width, &tmp.height,
-                    &x_offset, &tmp.y_offset) == 4) {
+                    &tmp.x_offset, &tmp.y_offset) == 4) {
       current_glyph = (Glyph*) malloc(sizeof(Glyph)
                                       + tmp.height * sizeof(rowbitmap_t));
       *current_glyph = tmp;
       // We only get number of bytes large enough holding our width. We want
       // it always left-aligned.
       bitmap_shift =
-        8 * (sizeof(rowbitmap_t) - ((current_glyph->width + 7) / 8)) + x_offset;
+        8 * (sizeof(rowbitmap_t) - ((current_glyph->width + 7) / 8)) -
+              current_glyph->x_offset;
       row = -1;  // let's not start yet, wait for BITMAP
     }
     else if (strncmp(buffer, "BITMAP", strlen("BITMAP")) == 0) {
@@ -92,6 +98,47 @@ bool Font::LoadFont(const char *path) {
   }
   fclose(f);
   return true;
+}
+
+Font *Font::CreateOutlineFont() const {
+  Font *r = new Font();
+  const int kBorder = 1;
+  r->font_height_ = font_height_ + 2*kBorder;
+  r->base_line_ = base_line_ + kBorder;
+  for (CodepointGlyphMap::const_iterator it = glyphs_.begin();
+       it != glyphs_.end(); ++it) {
+    const Glyph *orig = it->second;
+    const int height = orig->height + 2 * kBorder;
+    const size_t alloc_size = sizeof(Glyph) + height * sizeof(rowbitmap_t);
+    Glyph *const tmp_glyph = (Glyph*) calloc(1, alloc_size);
+    tmp_glyph->width  = orig->width  + 2*kBorder;
+    tmp_glyph->height = height;
+    tmp_glyph->device_width  = orig->device_width;
+    tmp_glyph->device_height = height;
+    tmp_glyph->y_offset = orig->y_offset - kBorder;
+    // TODO: we don't really need bounding box, right ?
+    const rowbitmap_t fill_pattern = 0b111;
+    const rowbitmap_t start_mask   = 0b010;
+    // Fill the border
+    for (int h = 0; h < orig->height; ++h) {
+      rowbitmap_t fill = fill_pattern;
+      rowbitmap_t orig_bitmap = orig->bitmap[h] >> kBorder;
+      for (rowbitmap_t m = start_mask; m; m <<= 1, fill <<= 1) {
+        if (orig_bitmap & m) {
+          tmp_glyph->bitmap[h+kBorder-1] |= fill;
+          tmp_glyph->bitmap[h+kBorder+0] |= fill;
+          tmp_glyph->bitmap[h+kBorder+1] |= fill;
+        }
+      }
+    }
+    // Remove original font again.
+    for (int h = 0; h < orig->height; ++h) {
+      rowbitmap_t orig_bitmap = orig->bitmap[h] >> kBorder;
+      tmp_glyph->bitmap[h+kBorder] &= ~orig_bitmap;
+    }
+    r->glyphs_[it->first] = tmp_glyph;
+  }
+  return r;
 }
 
 const Font::Glyph *Font::FindGlyph(uint32_t unicode_codepoint) const {
@@ -116,7 +163,7 @@ int Font::DrawGlyph(Canvas *c, int x_pos, int y_pos,
   for (int y = 0; y < g->height; ++y) {
     const rowbitmap_t row = g->bitmap[y];
     rowbitmap_t x_mask = 0x80000000;
-    for (int x = 0; x < g->width; ++x, x_mask >>= 1) {
+    for (int x = 0; x < g->device_width; ++x, x_mask >>= 1) {
       if (row & x_mask) {
         c->SetPixel(x_pos + x, y_pos + y, color.r, color.g, color.b);
       } else if (bgcolor) {
@@ -124,7 +171,7 @@ int Font::DrawGlyph(Canvas *c, int x_pos, int y_pos,
       }
     }
   }
-  return g->width;
+  return g->device_width;
 }
 
 int Font::DrawGlyph(Canvas *c, int x_pos, int y_pos, const Color &color,

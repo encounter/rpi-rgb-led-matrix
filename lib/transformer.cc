@@ -15,6 +15,7 @@
 // along with this program.  If not, see <http://gnu.org/licenses/gpl-2.0.txt>
 
 #include <assert.h>
+#include <stdio.h>
 
 #include "transformer.h"
 
@@ -39,12 +40,6 @@ public:
 private:
   Canvas *delegatee_;
   int angle_;
-  float pivot_x_;
-  float pivot_y_;
-  int cos_;
-  int sin_;
-  int offset_x_;
-  int offset_y_;
 };
 
 RotateTransformer::TransformCanvas::TransformCanvas(int angle)
@@ -53,24 +48,27 @@ RotateTransformer::TransformCanvas::TransformCanvas(int angle)
 }
 
 void RotateTransformer::TransformCanvas::SetDelegatee(Canvas* delegatee) {
-  pivot_x_ = (delegatee->width() - 1) / 2;
-  pivot_y_ = (delegatee->height() - 1) / 2;
   delegatee_ = delegatee;
 }
 
 void RotateTransformer::TransformCanvas::SetPixel(int x, int y, uint8_t red, uint8_t green, uint8_t blue) {
-  // translate point to origin
-  x -= pivot_x_;
-  y -= pivot_y_;
-
-  float rot_x = x * cos_ - y * sin_;
-  float rot_y = x * sin_ + y * cos_;
-
-  // translate back
-  x = rot_x + pivot_x_ + offset_x_;
-  y = rot_y + pivot_y_ + offset_y_;
-
-  delegatee_->SetPixel(x, y, red, green, blue);
+  switch (angle_) {
+  case 0:
+    delegatee_->SetPixel(x, y, red, green, blue);
+    break;
+  case 90:
+    delegatee_->SetPixel(delegatee_->width() - y - 1, x,
+                         red, green, blue);
+    break;
+  case 180:
+    delegatee_->SetPixel(delegatee_->width() - x - 1,
+                         delegatee_->height() - y - 1,
+                         red, green, blue);
+    break;
+  case 270:
+    delegatee_->SetPixel(y, delegatee_->height() - x - 1, red, green, blue);
+    break;
+  }
 }
 
 int RotateTransformer::TransformCanvas::width() const {
@@ -91,14 +89,7 @@ void RotateTransformer::TransformCanvas::Fill(uint8_t red, uint8_t green, uint8_
 
 void RotateTransformer::TransformCanvas::SetAngle(int angle) {
   assert(angle % 90 == 0);  // We currenlty enforce that for more pretty output
-  angle_ = angle % 360;
-
-  sin_ = (angle_ ==  90 ?  1 : (angle_ == 270 ? -1 : 0));
-  cos_ = (angle_ == 180 ? -1 : (angle_ ==   0 ?  1 : 0));
-
-  // Offset needed cause of little precision errors on 180° and 270°
-  offset_x_ = (angle_ == 90 || angle_ == 180 ? 1 : 0);
-  offset_y_ = (angle_ == 180 || angle_ == 270 ? 1 : 0);
+  angle_ = (angle + 360) % 360;
 }
 
 /**********************/
@@ -153,75 +144,88 @@ void LinkedTransformer::DeleteTransformers() {
   list_.clear();
 }
 
-/***********************************/
-/* Large Square Transformer Canvas */
-/***********************************/
-class LargeSquare64x64Transformer::TransformCanvas : public Canvas {
+// U-Arrangement Transformer.
+class UArrangementTransformer::TransformCanvas : public Canvas {
 public:
-  TransformCanvas() : delegatee_(NULL) {}
+  TransformCanvas(int parallel) : parallel_(parallel), delegatee_(NULL) {}
 
   void SetDelegatee(Canvas* delegatee);
 
   virtual void Clear();
   virtual void Fill(uint8_t red, uint8_t green, uint8_t blue);
-  virtual int width() const;
-  virtual int height() const;
+  virtual int width() const { return width_; }
+  virtual int height() const { return height_; }
   virtual void SetPixel(int x, int y, uint8_t red, uint8_t green, uint8_t blue);
 
 private:
+  const int parallel_;
+  int width_;
+  int height_;
+  int panel_height_;
   Canvas *delegatee_;
 };
 
-void LargeSquare64x64Transformer::TransformCanvas::SetDelegatee(Canvas* delegatee) {
-  // Our assumptions of the underlying geometry:
-  assert(delegatee->height() == 32);
-  assert(delegatee->width() == 128);
-
+void UArrangementTransformer::TransformCanvas::SetDelegatee(Canvas* delegatee) {
   delegatee_ = delegatee;
+  width_ = (delegatee->width() / 64) * 32;   // Div in middle at 32px boundary
+  height_ = 2 * delegatee->height();
+  if (delegatee->width() % 64 != 0) {
+    fprintf(stderr, "An U-arrangement would need an even number of panels "
+            "unless you can fold one in the middle...\n");
+  }
+  if (delegatee->height() % parallel_ != 0) {
+    fprintf(stderr, "For parallel=%d we would expect the height=%d to be "
+            "divisible by %d ??\n", parallel_, delegatee->height(), parallel_);
+    assert(false);
+  }
+  panel_height_ = delegatee->height() / parallel_;
 }
 
-void LargeSquare64x64Transformer::TransformCanvas::Clear() {
+void UArrangementTransformer::TransformCanvas::Clear() {
   delegatee_->Clear();
 }
 
-void LargeSquare64x64Transformer::TransformCanvas::Fill(uint8_t red, uint8_t green, uint8_t blue) {
+void UArrangementTransformer::TransformCanvas::Fill(
+  uint8_t red, uint8_t green, uint8_t blue) {
   delegatee_->Fill(red, green, blue);
 }
 
-int LargeSquare64x64Transformer::TransformCanvas::width() const {
-  return 64;
-}
-
-int LargeSquare64x64Transformer::TransformCanvas::height() const {
-  return 64;
-}
-
-void LargeSquare64x64Transformer::TransformCanvas::SetPixel(int x, int y, uint8_t red, uint8_t green, uint8_t blue) {
-  if (x < 0 || x >= width() || y < 0 || y >= height()) return;
-  // We have up to column 64 one direction, then folding around. Lets map
-  if (y > 31) {
-    x = 127 - x;
-    y = 63 - y;
+void UArrangementTransformer::TransformCanvas::SetPixel(
+  int x, int y, uint8_t red, uint8_t green, uint8_t blue) {
+  if (x < 0 || x >= width_ || y < 0 || y >= height_) return;
+  const int slab_height = 2*panel_height_;   // one folded u-shape
+  const int base_y = (y / slab_height) * panel_height_;
+  y %= slab_height;
+  if (y < panel_height_) {
+    x += delegatee_->width() / 2;
+  } else {
+    x = width_ - x - 1;
+    y = slab_height - y - 1;
   }
-  delegatee_->SetPixel(x, y, red, green, blue);
+  delegatee_->SetPixel(x, base_y + y, red, green, blue);
 }
 
-/****************************/
-/* Large Square Transformer */
-/****************************/
-LargeSquare64x64Transformer::LargeSquare64x64Transformer()
-  : canvas_(new TransformCanvas()) {
+UArrangementTransformer::UArrangementTransformer(int parallel)
+  : canvas_(new TransformCanvas(parallel)) {
+  assert(parallel > 0);
 }
 
-LargeSquare64x64Transformer::~LargeSquare64x64Transformer() {
+UArrangementTransformer::~UArrangementTransformer() {
   delete canvas_;
 }
 
-Canvas *LargeSquare64x64Transformer::Transform(Canvas *output) {
+Canvas *UArrangementTransformer::Transform(Canvas *output) {
   assert(output != NULL);
 
   canvas_->SetDelegatee(output);
   return canvas_;
 }
 
+// Legacly LargeSquare64x64Transformer: uses the UArrangementTransformer, but
+// does things so that it looks the same as before.
+LargeSquare64x64Transformer::LargeSquare64x64Transformer()
+  : arrange_(1), rotated_(180) { }
+Canvas *LargeSquare64x64Transformer::Transform(Canvas *output) {
+  return rotated_.Transform(arrange_.Transform(output));
+}
 } // namespace rgb_matrix

@@ -93,7 +93,7 @@ namespace rgb_matrix {
    (1 << 19) | (1 << 20) | (1 << 21) | (1 << 26)
 );
 
-GPIO::GPIO() : output_bits_(0), gpio_port_(NULL) {
+GPIO::GPIO() : output_bits_(0), slowdown_(1), gpio_port_(NULL) {
 }
 
 uint32_t GPIO::InitOutputs(uint32_t outputs) {
@@ -102,14 +102,16 @@ uint32_t GPIO::InitOutputs(uint32_t outputs) {
     return 0;
   }
 
-#ifdef ADAFRUIT_RGBMATRIX_HAT_PWM
   // Hack: the user soldered together GPIO 18 (new OE) with GPIO 4 (old OE).
   // We want to make extra sure that, whatever the outside system set as pinmux,
   // the old OE is not also set as output so that these GPIO outputs don't fight
   // each other.
-  // So explicitly set this particular pin as input.
+  // So explicitly set both of these pins as input initially, so the user
+  // can switch between the two modes without trouble.
+  // (TODO: this really only needs to be done in the Adafruit HAT case, so
+  // we should exclude the other cases).
   INP_GPIO(4);
-#endif
+  INP_GPIO(18);
 
   outputs &= kValidBits;   // Sanitize input.
   output_bits_ = outputs;
@@ -159,14 +161,15 @@ static uint32_t *mmap_bcm_register(bool isRPi2, off_t register_offset) {
   close(mem_fd);
 
   if (result == MAP_FAILED) {
-    fprintf(stderr, "mmap error %p\n", result);
+    fprintf(stderr, "mmap error %p\n", (void*)result);
     return NULL;
   }
   return result;
 }
 
 // Based on code example found in http://elinux.org/RPi_Low-level_peripherals
-bool GPIO::Init() {
+bool GPIO::Init(int slowdown) {
+  slowdown_ = slowdown;
   gpio_port_ = mmap_bcm_register(IsRaspberryPi2(), GPIO_REGISTER_OFFSET);
   if (gpio_port_ == NULL) {
     return false;
@@ -210,6 +213,22 @@ private:
   const uint32_t bits_;
   const std::vector<int> nano_specs_;
 };
+
+static bool LinuxHasModuleLoaded(const char *name) {
+  FILE *f = fopen("/proc/modules", "r");
+  if (f == NULL) return false; // don't care.
+  char buf[256];
+  const size_t namelen = strlen(name);
+  bool found = false;
+  while (fgets(buf, sizeof(buf), f) != NULL) {
+    if (strncmp(buf, name, namelen) == 0) {
+      found = true;
+      break;
+    }
+  }
+  fclose(f);
+  return found;
+}
 
 static volatile uint32_t *timer1Mhz = NULL;
 
@@ -278,10 +297,30 @@ static void sleep_nanos_rpi_2(long nanos) {
 // It only works on GPIO-18 though.
 class HardwarePinPulser : public PinPulser {
 public:
-  static bool CanHandle(uint32_t gpio_mask) { return gpio_mask == (1 << 18); }
+  static bool CanHandle(uint32_t gpio_mask) {
+#ifdef DISABLE_HARDWARE_PULSES
+    return false;
+#else
+    return gpio_mask == (1 << 18);
+#endif
+  }
 
-  HardwarePinPulser(uint32_t pins, const std::vector<int> &specs) {
+  HardwarePinPulser(uint32_t pins, const std::vector<int> &specs)
+    : triggered_(false) {
     assert(CanHandle(pins));
+
+    if (LinuxHasModuleLoaded("snd_bcm2835")) {
+      fprintf(stderr,
+              "\n%s=== snd_bcm2835: found that the Pi sound module is loaded. ===%s\n"
+              "Don't use the built-in sound of the Pi together with this lib; it is known to be\n"
+	      "incompatible and cause trouble and hangs (you can still use external USB sound adapters).\n\n"
+              "See Troubleshooting section in README how to disable the sound module.\n"
+	      "You can also run with --led-no-hardware-pulse to avoid the incompatibility,\n"
+	      "but you will have more flicker.\n"
+              "Exiting; fix the above first or use --led-no-hardware-pulse\n\n",
+              "\033[1;31m", "\033[0m");
+      exit(1);
+    }
 
     for (size_t i = 0; i < specs.size(); ++i) {
       sleep_hints_.push_back(specs[i] / 1000);
@@ -343,13 +382,18 @@ public:
 
     sleep_hint_ = sleep_hints_[c];
     start_time_ = *timer1Mhz;
+    triggered_ = true;
     pwm_reg_[PWM_CTL] = PWM_CTL_USEF1 | PWM_CTL_PWEN1 | PWM_CTL_POLA1;
   }
 
   virtual void WaitPulseFinished() {
+    if (!triggered_) return;
     // Determine how long we already spent and sleep to get close to the
     // actual end-time of our sleep period.
     // (substract 25 usec, as this is the OS overhead).
+    // TODO(hzeller): find if it is possible to get some sort of interrupt from
+    //   the hardware once it is done with the pulse. Sounds silly that there is
+    //   not.
     const uint32_t elapsed_usec = *timer1Mhz - start_time_;
     const int to_sleep = sleep_hint_ - elapsed_usec - 25;
     if (to_sleep > 0) {
@@ -360,6 +404,7 @@ public:
       // busy wait until done.
     }
     pwm_reg_[PWM_CTL] = PWM_CTL_USEF1 | PWM_CTL_POLA1 | PWM_CTL_CLRF1;
+    triggered_ = false;
   }
 
 private:
@@ -395,20 +440,20 @@ private:
   volatile uint32_t *clk_reg_;
   uint32_t start_time_;
   int sleep_hint_;
+  bool triggered_;
 };
 
 } // end anonymous namespace
 
 // Public PinPulser factory
 PinPulser *PinPulser::Create(GPIO *io, uint32_t gpio_mask,
+                             bool allow_hardware_pulsing,
                              const std::vector<int> &nano_wait_spec) {
-  // The only implementation so far.
   if (!Timers::Init()) return NULL;
-  if (HardwarePinPulser::CanHandle(gpio_mask)) {
+  if (allow_hardware_pulsing && HardwarePinPulser::CanHandle(gpio_mask)) {
     return new HardwarePinPulser(gpio_mask, nano_wait_spec);
   } else {
     return new TimerBasedPinPulser(io, gpio_mask, nano_wait_spec);
   }
 }
-
 } // namespace rgb_matrix

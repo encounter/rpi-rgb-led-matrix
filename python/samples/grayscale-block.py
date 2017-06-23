@@ -2,11 +2,12 @@
 from samplebase import SampleBase
 import time
 
+
 class GrayscaleBlock(SampleBase):
     def __init__(self, *args, **kwargs):
         super(GrayscaleBlock, self).__init__(*args, **kwargs)
 
-    def Run(self):
+    def run(self):
         sub_blocks = 16
         width = self.matrix.width
         height = self.matrix.height
@@ -17,7 +18,7 @@ class GrayscaleBlock(SampleBase):
         while True:
             for y in range(0, height):
                 for x in range(0, width):
-                    c = sub_blocks * (y / y_step) + (x / x_step)
+                    c = sub_blocks * int(y / y_step) + int(x / x_step)
                     if count % 4 == 0:
                         self.matrix.SetPixel(x, y, c, c, c)
                     elif count % 4 == 1:
@@ -33,6 +34,6 @@ class GrayscaleBlock(SampleBase):
 
 # Main function
 if __name__ == "__main__":
-    parser = GrayscaleBlock()
-    if (not parser.process()):
-        parser.print_help()
+    grayscale_block = GrayscaleBlock()
+    if (not grayscale_block.process()):
+        grayscale_block.print_help()

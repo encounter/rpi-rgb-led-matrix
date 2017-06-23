@@ -33,7 +33,13 @@ class GPIO {
 
   // Initialize before use. Returns 'true' if successful, 'false' otherwise
   // (e.g. due to a permission problem).
-  bool Init();
+  bool Init(int
+#if RGB_SLOWDOWN_GPIO
+            slowdown = RGB_SLOWDOWN_GPIO
+#else
+            slowdown = 1
+#endif
+            );
 
   // Initialize outputs.
   // Returns the bits that are actually set.
@@ -43,24 +49,18 @@ class GPIO {
   inline void SetBits(uint32_t value) {
     if (!value) return;
     *gpio_set_bits_ = value;
-#ifdef RGB_SLOWDOWN_GPIO
-    *gpio_set_bits_ = value;
-#  if RGB_SLOWDOWN_GPIO > 1
-    *gpio_set_bits_ = value;   // for really slow cases
-#  endif
-#endif
+    for (int i = 0; i < slowdown_; ++i) {
+      *gpio_set_bits_ = value;
+    }
   }
 
   // Clear the bits that are '1' in the output. Leave the rest untouched.
   inline void ClearBits(uint32_t value) {
     if (!value) return;
     *gpio_clr_bits_ = value;
-#ifdef RGB_SLOWDOWN_GPIO
-    *gpio_clr_bits_ = value;
-#  if RGB_SLOWDOWN_GPIO > 1
-    *gpio_clr_bits_ = value;  // for really slow cases
-#  endif
-#endif
+    for (int i = 0; i < slowdown_; ++i) {
+      *gpio_clr_bits_ = value;
+    }
   }
 
   // Write all the bits of "value" mentioned in "mask". Leave the rest untouched.
@@ -75,6 +75,7 @@ class GPIO {
 
  private:
   uint32_t output_bits_;
+  int slowdown_;
   volatile uint32_t *gpio_port_;
   volatile uint32_t *gpio_set_bits_;
   volatile uint32_t *gpio_clr_bits_;
@@ -91,6 +92,7 @@ public:
   // "nano_wait_spec" contains a list of time periods we'd like
   //   invoke later. This can be used to pre-process timings if needed.
   static PinPulser *Create(GPIO *io, uint32_t gpio_mask,
+                           bool allow_hardware_pulsing,
                            const std::vector<int> &nano_wait_spec);
 
   virtual ~PinPulser() {}
@@ -103,4 +105,5 @@ public:
 };
 
 }  // end namespace rgb_matrix
+
 #endif  // RPI_GPIO_H

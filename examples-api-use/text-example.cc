@@ -19,17 +19,15 @@ static int usage(const char *progname) {
   fprintf(stderr, "usage: %s [options]\n", progname);
   fprintf(stderr, "Reads text from stdin and displays it. "
           "Empty string: clear screen\n");
-  fprintf(stderr, "Options:\n"
-          "\t-f <font-file>: Use given font.\n"
-          "\t-r <rows>     : Display rows. 16 for 16x32, 32 for 32x32. "
-          "Default: 32\n"
-          "\t-P <parallel> : For Plus-models or RPi2: parallel chains. 1..3. "
-          "Default: 1\n"
-          "\t-c <chained>  : Daisy-chained boards. Default: 1.\n"
-          "\t-b <brightness>: Sets brightness percent. Default: 100.\n"
-          "\t-x <x-origin> : X-Origin of displaying text (Default: 0)\n"
-          "\t-y <y-origin> : Y-Origin of displaying text (Default: 0)\n"
-          "\t-C <r,g,b>    : Color. Default 255,255,0\n");
+  fprintf(stderr, "Options:\n");
+  rgb_matrix::PrintMatrixFlags(stderr);
+  fprintf(stderr,
+          "\t-f <font-file>    : Use given font.\n"
+          "\t-b <brightness>   : Sets brightness percent. Default: 100.\n"
+          "\t-x <x-origin>     : X-Origin of displaying text (Default: 0)\n"
+          "\t-y <y-origin>     : Y-Origin of displaying text (Default: 0)\n"
+          "\t-C <r,g,b>        : Color. Default 255,255,0\n"
+          "\t-B <r,g,b>        : Background-Color. Default 0,0,0\n");
   return 1;
 }
 
@@ -38,28 +36,31 @@ static bool parseColor(Color *c, const char *str) {
 }
 
 int main(int argc, char *argv[]) {
+  RGBMatrix *canvas = rgb_matrix::CreateMatrixFromFlags(&argc, &argv);
+
   Color color(255, 255, 0);
+  Color bg_color(0, 0, 0);
   const char *bdf_font_file = NULL;
-  int rows = 32;
-  int chain = 1;
-  int parallel = 1;
   int x_orig = 0;
   int y_orig = -1;
   int brightness = 100;
 
   int opt;
-  while ((opt = getopt(argc, argv, "r:P:c:x:y:f:C:b:")) != -1) {
+  while ((opt = getopt(argc, argv, "x:y:f:C:B:b:")) != -1) {
     switch (opt) {
-    case 'r': rows = atoi(optarg); break;
-    case 'P': parallel = atoi(optarg); break;
-    case 'c': chain = atoi(optarg); break;
     case 'b': brightness = atoi(optarg); break;
     case 'x': x_orig = atoi(optarg); break;
     case 'y': y_orig = atoi(optarg); break;
     case 'f': bdf_font_file = strdup(optarg); break;
     case 'C':
       if (!parseColor(&color, optarg)) {
-        fprintf(stderr, "Invalid color spec.\n");
+        fprintf(stderr, "Invalid color spec: %s\n", optarg);
+        return usage(argv[0]);
+      }
+      break;
+    case 'B':
+      if (!parseColor(&bg_color, optarg)) {
+        fprintf(stderr, "Invalid background color spec: %s\n", optarg);
         return usage(argv[0]);
       }
       break;
@@ -73,6 +74,9 @@ int main(int argc, char *argv[]) {
     return usage(argv[0]);
   }
 
+  if (canvas == NULL)
+    return 1;
+
   /*
    * Load font. This needs to be a filename with a bdf bitmap font.
    */
@@ -82,39 +86,11 @@ int main(int argc, char *argv[]) {
     return usage(argv[0]);
   }
 
-  if (rows != 8 && rows != 16 && rows != 32 && rows != 64) {
-    fprintf(stderr, "Rows can one of 8, 16, 32 or 64 "
-            "for 1:4, 1:8, 1:16 and 1:32 multiplexing respectively.\n");
-    return 1;
-  }
-
-  if (chain < 1) {
-    fprintf(stderr, "Chain outside usable range\n");
-    return 1;
-  }
-  if (chain > 8) {
-    fprintf(stderr, "That is a long chain. Expect some flicker.\n");
-  }
-  if (parallel < 1 || parallel > 3) {
-    fprintf(stderr, "Parallel outside usable range.\n");
-    return 1;
-  }
   if (brightness < 1 || brightness > 100) {
     fprintf(stderr, "Brightness is outside usable range.\n");
     return 1;
   }
 
-  /*
-   * Set up GPIO pins. This fails when not running as root.
-   */
-  GPIO io;
-  if (!io.Init())
-    return 1;
-
-  /*
-   * Set up the RGBMatrix. It implements a 'Canvas' interface.
-   */
-  RGBMatrix *canvas = new RGBMatrix(&io, rows, chain, parallel);
   canvas->SetBrightness(brightness);
 
   bool all_extreme_colors = brightness == 100;
@@ -144,7 +120,8 @@ int main(int argc, char *argv[]) {
     }
     if (line_empty)
       continue;
-    rgb_matrix::DrawText(canvas, font, x, y + font.baseline(), color, line);
+    rgb_matrix::DrawText(canvas, font, x, y + font.baseline(),
+                         color, &bg_color, line);
     y += font.height();
   }
 

@@ -41,7 +41,7 @@ popt.SetSubtractMaskFromSilk(False)
 #   gerbv *
 # just makes sense.
 plot_plan = [
-    ( Edge_Cuts, "0-EdgeCuts",    "Edges" ),
+    ( Edge_Cuts, "0-Edge_Cuts",   "Edges" ),
 
     ( F_Paste,   "1-PasteTop",    "Paste top" ),
     ( F_SilkS,   "2-SilkTop",     "Silk top" ),
@@ -72,7 +72,8 @@ drlwriter.SetMapFileFormat( PLOT_FORMAT_PDF )
 mirror = False
 minimalHeader = False
 offset = wxPoint(0,0)
-drlwriter.SetOptions( mirror, minimalHeader, offset )
+mergeNPTH = True
+drlwriter.SetOptions( mirror, minimalHeader, offset, mergeNPTH )
 
 metricFmt = True
 drlwriter.SetFormat( metricFmt )
