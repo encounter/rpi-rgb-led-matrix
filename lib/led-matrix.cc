@@ -381,6 +381,10 @@ FrameCanvas *RGBMatrix::CreateFrameCanvas() {
   return result;
 }
 
+void RGBMatrix::DeleteFrameCanvas(FrameCanvas *canvas) {
+  delete canvas;
+}
+
 FrameCanvas *RGBMatrix::SwapOnVSync(FrameCanvas *other,
                                     unsigned frame_fraction) {
   if (frame_fraction == 0) frame_fraction = 1; // correct user error.
