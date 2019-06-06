@@ -268,7 +268,9 @@ public:
   // The ownership of the created Canvases remains with the RGBMatrix, so you
   // don't have to worry about deleting them.
   FrameCanvas *CreateFrameCanvas();
+
   void DeleteFrameCanvas(FrameCanvas *canvas);
+
   // This method waits to the next VSync and swaps the active buffer with the
   // supplied buffer. The formerly active buffer is returned.
   //
