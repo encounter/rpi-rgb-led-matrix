@@ -24,7 +24,6 @@
 #include <time.h>
 #include <stdio.h>
 #include <sys/time.h>
-#include <algorithm>
 
 #include "gpio.h"
 #include "thread.h"
@@ -380,11 +379,6 @@ FrameCanvas *RGBMatrix::CreateFrameCanvas() {
 
   created_frames_.push_back(result);
   return result;
-}
-
-void RGBMatrix::DeleteFrameCanvas(FrameCanvas *canvas) {
-  // created_frames_.erase(std::remove(created_frames_.begin(), created_frames_.end(), canvas), created_frames_.end());
-  delete canvas;
 }
 
 FrameCanvas *RGBMatrix::SwapOnVSync(FrameCanvas *other,

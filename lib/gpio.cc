@@ -117,8 +117,11 @@
 #define INP_GPIO(g) *(s_GPIO_registers+((g)/10)) &= ~(7<<(((g)%10)*3))
 #define OUT_GPIO(g) *(s_GPIO_registers+((g)/10)) |=  (1<<(((g)%10)*3))
 
-#define GPIO_SET *(gpio+7)  // sets   bits which are 1 ignores bits which are 0
-#define GPIO_CLR *(gpio+10) // clears bits which are 1 ignores bits which are 0
+#define GPIO_SET *(s_GPIO_registers+7)  // sets   bits which are 1 ignores bits which are 0
+#define GPIO_CLR *(s_GPIO_registers+10) // clears bits which are 1 ignores bits which are 0
+
+#define GPIO_PULL *(s_GPIO_registers+37) // Pull up/pull down
+#define GPIO_PULLCLK0 *(s_GPIO_registers+38) // Pull up/pull down clock
 
 // We're pre-mapping all the registers on first call of GPIO::Init(),
 // so that it is possible to drop privileges afterwards and still have these
@@ -194,6 +197,15 @@ uint32_t GPIO::RequestInputs(uint32_t inputs) {
       INP_GPIO(b);
     }
   }
+
+  // Enable pull-up on inputs
+  GPIO_PULL = 2;
+  GPIO_PULLCLK0 = inputs;
+
+  // OK, we're done
+  GPIO_PULL = 0;
+  GPIO_PULLCLK0 = 0;
+
   input_bits_ |= inputs;
   return inputs;
 }
