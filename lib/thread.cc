@@ -15,9 +15,11 @@
 
 #include "thread.h"
 
+#include <assert.h>
+#include <limits.h>
 #include <sched.h>
 #include <stdio.h>
-#include <assert.h>
+#include <stdlib.h>
 #include <string.h>
 
 namespace rgb_matrix {
@@ -49,8 +51,16 @@ void Thread::Start(int priority, uint32_t affinity_mask) {
     struct sched_param p;
     p.sched_priority = priority;
     if ((err = pthread_setschedparam(thread_, SCHED_FIFO, &p))) {
-      fprintf(stderr, "FYI: Can't set realtime thread priority=%d %s\n",
-              priority, strerror(err));
+      char buffer[PATH_MAX];
+      const char *bin = realpath("/proc/self/exe", buffer);  // Linux specific.
+      fprintf(stderr, "Can't set realtime thread priority=%d: %s.\n"
+              "\tYou are probably not running as root ?\n"
+              "\tThis will seriously mess with color stability and flicker\n"
+              "\tof the matrix. Please run as `root` (e.g. by invoking this\n"
+              "\tprogram with `sudo`), or setting the capability on this\n"
+              "\tbinary by calling\n"
+              "\tsudo setcap 'cap_sys_nice=eip' %s\n",
+              p.sched_priority, strerror(err), bin ? bin : "<this binary>");
     }
   }
 
@@ -63,8 +73,8 @@ void Thread::Start(int priority, uint32_t affinity_mask) {
       }
     }
     if ((err=pthread_setaffinity_np(thread_, sizeof(cpu_mask), &cpu_mask))) {
-      //fprintf(stderr, "FYI: Couldn't set affinity 0x%x: %s\n",
-      //        affinity_mask, strerror(err));
+      // On a Pi1, this won't work as there is only one core. Don't worry in
+      // that case.
     }
   }
 

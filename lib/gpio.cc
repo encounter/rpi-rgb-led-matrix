@@ -43,19 +43,14 @@
  * This might be interesting to tweak in particular if you have a realtime
  * kernel with different characteristics.
  */
-#define EMPIRICAL_NANOSLEEP_OVERHEAD_US 25
+#define EMPIRICAL_NANOSLEEP_OVERHEAD_US 12
 
 /*
- * In few cases on a standard kernel, we see that the overhead is actually
- * even longer; these additional 35usec cover up for the 99.999%-ile.
- * So ideally, we always use these additional time and also busy-wait them,
- * right ?
- * However, that would take away a lot of CPU on older, one-core Raspberry Pis
- * or Pi Zeros. They rely for us to sleep when possible for it to do work.
- * So we only enable it, if we have have a newer Pi where we anyway burn
- * away on one core (And are isolated there with isolcpus=3).
+ * In case of non-hardware pulse generation, use nanosleep if we want to wait
+ * longer than these given microseconds beyond the general overhead.
+ * Below that, just use busy wait.
  */
-#define EMPIRICAL_NANOSLEEP_EXTRA_OVERHEAD_US 35
+#define MINIMUM_NANOSLEEP_TIME_US 5
 
 /* In order to determine useful values for above, set this to 1 and use the
  * hardware pin-pulser.
@@ -69,6 +64,7 @@
 // Raspberry 1 and 2 have different base addresses for the periphery
 #define BCM2708_PERI_BASE        0x20000000
 #define BCM2709_PERI_BASE        0x3F000000
+#define BCM2711_PERI_BASE        0xFE000000
 
 #define GPIO_REGISTER_OFFSET         0x200000
 #define COUNTER_1Mhz_REGISTER_OFFSET   0x3000
@@ -114,8 +110,8 @@
 #define PWM_BASE_TIME_NS 2
 
 // GPIO setup macros. Always use INP_GPIO(x) before using OUT_GPIO(x).
-#define INP_GPIO(g) *(s_GPIO_registers+((g)/10)) &= ~(7<<(((g)%10)*3))
-#define OUT_GPIO(g) *(s_GPIO_registers+((g)/10)) |=  (1<<(((g)%10)*3))
+#define INP_GPIO(g) *(s_GPIO_registers+((g)/10)) &= ~(7ull<<(((g)%10)*3))
+#define OUT_GPIO(g) *(s_GPIO_registers+((g)/10)) |=  (1ull<<(((g)%10)*3))
 
 #define GPIO_SET *(s_GPIO_registers+7)  // sets   bits which are 1 ignores bits which are 0
 #define GPIO_CLR *(s_GPIO_registers+10) // clears bits which are 1 ignores bits which are 0
@@ -132,23 +128,18 @@ static volatile uint32_t *s_PWM_registers = NULL;
 static volatile uint32_t *s_CLK_registers = NULL;
 
 namespace rgb_matrix {
-/*static*/ const uint32_t GPIO::kValidBits
-= ((1 <<  0) | (1 <<  1) | // RPi 1 - Revision 1 accessible
-   (1 <<  2) | (1 <<  3) | // RPi 1 - Revision 2 accessible
-   (1 <<  4) | (1 <<  7) | (1 << 8) | (1 <<  9) |
-   (1 << 10) | (1 << 11) | (1 << 14) | (1 << 15)| (1 <<17) | (1 << 18) |
-   (1 << 22) | (1 << 23) | (1 << 24) | (1 << 25)| (1 << 27) |
-   // support for A+/B+ and RPi2 with additional GPIO pins.
-   (1 <<  5) | (1 <<  6) | (1 << 12) | (1 << 13) | (1 << 16) |
-   (1 << 19) | (1 << 20) | (1 << 21) | (1 << 26)
-);
+#define GPIO_BIT(x) (1ull << x)
 
 GPIO::GPIO() : output_bits_(0), input_bits_(0), reserved_bits_(0),
-               slowdown_(1) {
+               slowdown_(1)
+#ifdef ENABLE_WIDE_GPIO_COMPUTE_MODULE
+             , uses_64_bit_(false)
+#endif
+{
 }
 
-uint32_t GPIO::InitOutputs(uint32_t outputs,
-                           bool adafruit_pwm_transition_hack_needed) {
+gpio_bits_t GPIO::InitOutputs(gpio_bits_t outputs,
+                              bool adafruit_pwm_transition_hack_needed) {
   if (s_GPIO_registers == NULL) {
     fprintf(stderr, "Attempt to init outputs but not yet Init()-ialized.\n");
     return 0;
@@ -169,13 +160,18 @@ uint32_t GPIO::InitOutputs(uint32_t outputs,
     // Even with PWM enabled, GPIO4 still can not be used, because it is
     // now connected to the GPIO18 and thus must stay an input.
     // So reserve this bit if it is not set in outputs.
-    reserved_bits_ = (1<<4) & ~outputs;
+    reserved_bits_ = GPIO_BIT(4) & ~outputs;
   }
 
-  outputs &= kValidBits;     // Sanitize: only bits on GPIO header allowed.
   outputs &= ~(output_bits_ | input_bits_ | reserved_bits_);
-  for (uint32_t b = 0; b <= 27; ++b) {
-    if (outputs & (1 << b)) {
+#ifdef ENABLE_WIDE_GPIO_COMPUTE_MODULE
+  const int kMaxAvailableBit = 45;
+  uses_64_bit_ |= (outputs >> 32) != 0;
+#else
+  const int kMaxAvailableBit = 31;
+#endif
+  for (int b = 0; b <= kMaxAvailableBit; ++b) {
+    if (outputs & GPIO_BIT(b)) {
       INP_GPIO(b);   // for writing, we first need to set as input.
       OUT_GPIO(b);
     }
@@ -184,16 +180,21 @@ uint32_t GPIO::InitOutputs(uint32_t outputs,
   return outputs;
 }
 
-uint32_t GPIO::RequestInputs(uint32_t inputs) {
+gpio_bits_t GPIO::RequestInputs(gpio_bits_t inputs) {
   if (s_GPIO_registers == NULL) {
     fprintf(stderr, "Attempt to init inputs but not yet Init()-ialized.\n");
     return 0;
   }
 
-  inputs &= kValidBits;     // Sanitize: only bits on GPIO header allowed.
   inputs &= ~(output_bits_ | input_bits_ | reserved_bits_);
-  for (uint32_t b = 0; b <= 27; ++b) {
-    if (inputs & (1 << b)) {
+#ifdef ENABLE_WIDE_GPIO_COMPUTE_MODULE
+  const int kMaxAvailableBit = 45;
+  uses_64_bit_ |= (inputs >> 32) != 0;
+#else
+  const int kMaxAvailableBit = 31;
+#endif
+  for (int b = 0; b <= kMaxAvailableBit; ++b) {
+    if (inputs & GPIO_BIT(b)) {
       INP_GPIO(b);
     }
   }
@@ -210,57 +211,98 @@ uint32_t GPIO::RequestInputs(uint32_t inputs) {
   return inputs;
 }
 
-static bool DetermineIsRaspberryPi2() {
-  char buffer[256];
-  FILE *fd = fopen("/proc/cpuinfo", "r");
-  if (fd == NULL) return false;
+// We are not interested in the _exact_ model, just good enough to determine
+// What to do.
+enum RaspberryPiModel {
+  PI_MODEL_1,
+  PI_MODEL_2,
+  PI_MODEL_3,
+  PI_MODEL_4
+};
 
-  long int found_revision = 0; 
-  while(fgets(buffer, sizeof(buffer), fd) != NULL) {
-    char *save_ptr = NULL;
-    char *key = strtok_r(buffer, ":", &save_ptr);
-    
-    if (strstr(key, "Revision") != NULL) {
-      char *str_value = strtok_r(NULL, ":", &save_ptr);
-      found_revision = strtol(str_value, NULL, 16);
-      break;
-    }
+static int ReadFileToBuffer(char *buffer, size_t size, const char *filename) {
+  const int fd = open(filename, O_RDONLY);
+  if (fd < 0) return -1;
+  ssize_t r = read(fd, buffer, size - 1); // assume one read enough
+  buffer[r >= 0 ? r : 0] = '\0';
+  close(fd);
+  return r;
+}
+
+static RaspberryPiModel DetermineRaspberryModel() {
+  char buffer[4096];
+  if (ReadFileToBuffer(buffer, sizeof(buffer), "/proc/cpuinfo") < 0) {
+    fprintf(stderr, "Reading cpuinfo: Could not determine Pi model\n");
+    return PI_MODEL_3;  // safe guess fallback.
   }
-  fclose(fd);
-
-  //remove warranty bits 24 and 25
-  found_revision &= ~0x3000000;
-  //is new revision numbers if bit 23 is set
-  if (found_revision & 0x800000) {
-    //proc information is stored bits 12-15
-    int proc_type = (found_revision & 0x7800) >> 12;
-    if (proc_type > 0) {
-      return true;
-    }
+  static const char RevisionTag[] = "Revision";
+  const char *revision_key;
+  if ((revision_key = strstr(buffer, RevisionTag)) == NULL) {
+    fprintf(stderr, "non-existent Revision: Could not determine Pi model\n");
+    return PI_MODEL_3;
   }
-  return false;
+  unsigned int pi_revision;
+  if (sscanf(index(revision_key, ':') + 1, "%x", &pi_revision) != 1) {
+    fprintf(stderr, "Unknown Revision: Could not determine Pi model\n");
+    return PI_MODEL_3;
+  }
+
+  // https://www.raspberrypi.org/documentation/hardware/raspberrypi/revision-codes/README.md
+  const unsigned pi_type = (pi_revision >> 4) & 0xff;
+  switch (pi_type) {
+  case 0x00: /* A */
+  case 0x01: /* B, Compute Module 1 */
+  case 0x02: /* A+ */
+  case 0x03: /* B+ */
+  case 0x05: /* Alpha ?*/
+  case 0x06: /* Compute Module1 */
+  case 0x09: /* Zero */
+  case 0x0c: /* Zero W */
+    return PI_MODEL_1;
+
+  case 0x04:  /* Pi 2 */
+    return PI_MODEL_2;
+
+  case 0x11: /* Pi 4 */
+    return PI_MODEL_4;
+
+  default:  /* a bunch of versions represneting Pi 3 */
+    return PI_MODEL_3;
+  }
 }
 
-static bool IsRaspberryPi2() {
-  static bool ispi2 = DetermineIsRaspberryPi2();
-  return ispi2;
+static RaspberryPiModel GetPiModel() {
+  static RaspberryPiModel pi_model = DetermineRaspberryModel();
+  return pi_model;
 }
 
-static uint32_t JitterAllowanceMicroseconds() {
-  // If this is a Raspberry Pi2 or 3, we can allow to burn a bit more busy-wait
-  // CPU cycles to get the timing accurate as we have more CPU to spare.
-  static int allowance_us = EMPIRICAL_NANOSLEEP_OVERHEAD_US
-    + (IsRaspberryPi2() ? EMPIRICAL_NANOSLEEP_EXTRA_OVERHEAD_US : 0);
-  return allowance_us;
+static int GetNumCores() {
+  return GetPiModel() == PI_MODEL_1 ? 1 : 4;
 }
 
-static uint32_t *mmap_bcm_register(bool isRPi2, off_t register_offset) {
-  const off_t base = (isRPi2 ? BCM2709_PERI_BASE : BCM2708_PERI_BASE);
+static uint32_t *mmap_bcm_register(off_t register_offset) {
+  off_t base = BCM2709_PERI_BASE;  // safe fallback guess.
+  switch (GetPiModel()) {
+  case PI_MODEL_1: base = BCM2708_PERI_BASE; break;
+  case PI_MODEL_2: base = BCM2709_PERI_BASE; break;
+  case PI_MODEL_3: base = BCM2709_PERI_BASE; break;
+  case PI_MODEL_4: base = BCM2711_PERI_BASE; break;
+  }
 
   int mem_fd;
   if ((mem_fd = open("/dev/mem", O_RDWR|O_SYNC) ) < 0) {
-    perror("can't open /dev/mem: ");
-    return NULL;
+    // Try to fall back to /dev/gpiomem. Unfortunately, that device
+    // is implemented in a way that it _only_ supports GPIO, not the
+    // other registers we need, such as PWM or COUNTER_1Mhz, which means
+    // we only can operate with degraded performance.
+    //
+    // But, instead of failing, mmap() then silently succeeds with the
+    // unsupported offset. So bail out here.
+    if (register_offset != GPIO_REGISTER_OFFSET)
+      return NULL;
+
+    mem_fd = open("/dev/gpiomem", O_RDWR|O_SYNC);
+    if (mem_fd < 0) return NULL;
   }
 
   uint32_t *result =
@@ -275,8 +317,8 @@ static uint32_t *mmap_bcm_register(bool isRPi2, off_t register_offset) {
 
   if (result == MAP_FAILED) {
     perror("mmap error: ");
-    fprintf(stderr, "%s: MMapping from base 0x%lx, offset 0x%lx\n",
-            isRPi2 ? "RPi2,3" : "RPi1", base, register_offset);
+    fprintf(stderr, "MMapping from base 0x%lx, offset 0x%lx\n",
+            base, register_offset);
     return NULL;
   }
   return result;
@@ -285,31 +327,25 @@ static uint32_t *mmap_bcm_register(bool isRPi2, off_t register_offset) {
 static bool mmap_all_bcm_registers_once() {
   if (s_GPIO_registers != NULL) return true;  // alrady done.
 
-  const bool isPI2 = IsRaspberryPi2();
-
   // The common GPIO registers.
-  s_GPIO_registers = mmap_bcm_register(isPI2, GPIO_REGISTER_OFFSET);
+  s_GPIO_registers = mmap_bcm_register(GPIO_REGISTER_OFFSET);
   if (s_GPIO_registers == NULL) {
     return false;
   }
 
-  // Time measurement.
-  uint32_t *timereg = mmap_bcm_register(isPI2, COUNTER_1Mhz_REGISTER_OFFSET);
-  if (timereg == NULL) {
-    return false;
+  // Time measurement. Might fail when run as non-root.
+  uint32_t *timereg = mmap_bcm_register(COUNTER_1Mhz_REGISTER_OFFSET);
+  if (timereg != NULL) {
+    s_Timer1Mhz = timereg + 1;
   }
-  s_Timer1Mhz = timereg + 1;
 
-  // Hardware pin-pulser.
-  s_PWM_registers  = mmap_bcm_register(isPI2, GPIO_PWM_BASE_OFFSET);
-  s_CLK_registers  = mmap_bcm_register(isPI2, GPIO_CLK_BASE_OFFSET);
-  if (!s_PWM_registers || !s_CLK_registers) {
-    return false;
-  }
+  // Hardware pin-pulser. Might fail when run as non-root.
+  s_PWM_registers  = mmap_bcm_register(GPIO_PWM_BASE_OFFSET);
+  s_CLK_registers  = mmap_bcm_register(GPIO_CLK_BASE_OFFSET);
+
   return true;
 }
 
-// Based on code example found in http://elinux.org/RPi_Low-level_peripherals
 bool GPIO::Init(int slowdown) {
   slowdown_ = slowdown;
 
@@ -319,16 +355,23 @@ bool GPIO::Init(int slowdown) {
   if (!mmap_all_bcm_registers_once())
     return false;
 
-  gpio_set_bits_ = s_GPIO_registers + (0x1C / sizeof(uint32_t));
-  gpio_clr_bits_ = s_GPIO_registers + (0x28 / sizeof(uint32_t));
-  gpio_read_bits_ = s_GPIO_registers + (0x34 / sizeof(uint32_t));
+  gpio_set_bits_low_ = s_GPIO_registers + (0x1C / sizeof(uint32_t));
+  gpio_clr_bits_low_ = s_GPIO_registers + (0x28 / sizeof(uint32_t));
+  gpio_read_bits_low_ = s_GPIO_registers + (0x34 / sizeof(uint32_t));
+
+#ifdef ENABLE_WIDE_GPIO_COMPUTE_MODULE
+  gpio_set_bits_high_ = s_GPIO_registers + (0x20 / sizeof(uint32_t));
+  gpio_clr_bits_high_ = s_GPIO_registers + (0x2C / sizeof(uint32_t));
+  gpio_read_bits_high_ = s_GPIO_registers + (0x38 / sizeof(uint32_t));
+#endif
+
   return true;
 }
 
 /*
  * We support also other pinouts that don't have the OE- on the hardware
  * PWM output pin, so we need to provide (impefect) 'manual' timing as well.
- * Hence all various sleep_nano() implementations depending on the hardware.
+ * Hence all various busy_wait_nano() implementations depending on the hardware.
  */
 
 // --- PinPulser. Private implementation parts.
@@ -344,9 +387,15 @@ public:
 // to get the timing, but not optimal.
 class TimerBasedPinPulser : public PinPulser {
 public:
-  TimerBasedPinPulser(GPIO *io, uint32_t bits,
+  TimerBasedPinPulser(GPIO *io, gpio_bits_t bits,
                       const std::vector<int> &nano_specs)
-    : io_(io), bits_(bits), nano_specs_(nano_specs) {}
+    : io_(io), bits_(bits), nano_specs_(nano_specs) {
+    if (!s_Timer1Mhz) {
+      fprintf(stderr, "FYI: not running as root which means we can't properly "
+              "control timing unless this is a real-time kernel. Expect color "
+              "degradation. Consider running as root with sudo.\n");
+    }
+  }
 
   virtual void SendPulse(int time_spec_number) {
     io_->ClearBits(bits_);
@@ -356,7 +405,7 @@ public:
 
 private:
   GPIO *const io_;
-  const uint32_t bits_;
+  const gpio_bits_t bits_;
   const std::vector<int> nano_specs_;
 };
 
@@ -376,9 +425,19 @@ static bool LinuxHasModuleLoaded(const char *name) {
   return found;
 }
 
-static void sleep_nanos_rpi_1(long nanos);
-static void sleep_nanos_rpi_2(long nanos);
-static void (*busy_sleep_impl)(long) = sleep_nanos_rpi_1;
+static void busy_wait_nanos_rpi_1(long nanos);
+static void busy_wait_nanos_rpi_2(long nanos);
+static void busy_wait_nanos_rpi_3(long nanos);
+static void busy_wait_nanos_rpi_4(long nanos);
+static void (*busy_wait_impl)(long) = busy_wait_nanos_rpi_3;
+
+// Best effort write to file. Used to set kernel parameters.
+static void WriteTo(const char *filename, const char *str) {
+  const int fd = open(filename, O_WRONLY);
+  if (fd < 0) return;
+  (void) write(fd, str, strlen(str));  // Best effort. Ignore return value.
+  close(fd);
+}
 
 // By default, the kernel applies some throtteling for realtime
 // threads to prevent starvation of non-RT threads. But we
@@ -386,20 +445,46 @@ static void (*busy_sleep_impl)(long) = sleep_nanos_rpi_1;
 // our RT-thread is locked onto one of these.
 // So let's tell it not to do that.
 static void DisableRealtimeThrottling() {
-  if (!IsRaspberryPi2()) return;   // Not safe if we don't have > 1 core.
-  const int out = open("/proc/sys/kernel/sched_rt_runtime_us", O_WRONLY);
-  if (out < 0) return;
-  write(out, "-1", 2);
-  close(out);
+  if (GetNumCores() == 1) return;   // Not safe if we don't have > 1 core.
+  // We need to leave the kernel a little bit of time, as it does not like
+  // us to hog the kernel solidly. The default of 950000 leaves 50ms that
+  // can generate visible flicker, so we reduce that to 1ms.
+  WriteTo("/proc/sys/kernel/sched_rt_runtime_us", "999000");
 }
 
 bool Timers::Init() {
   if (!mmap_all_bcm_registers_once())
     return false;
-  const bool isRPi2 = IsRaspberryPi2();
-  busy_sleep_impl = isRPi2 ? sleep_nanos_rpi_2 : sleep_nanos_rpi_1;
-  if (isRPi2) DisableRealtimeThrottling();
+
+  // Choose the busy-wait loop that fits our Pi.
+  switch (GetPiModel()) {
+  case PI_MODEL_1: busy_wait_impl = busy_wait_nanos_rpi_1; break;
+  case PI_MODEL_2: busy_wait_impl = busy_wait_nanos_rpi_2; break;
+  case PI_MODEL_3: busy_wait_impl = busy_wait_nanos_rpi_3; break;
+  case PI_MODEL_4: busy_wait_impl = busy_wait_nanos_rpi_4; break;
+  }
+
+  DisableRealtimeThrottling();
+  // If we have it, we run the update thread on core3. No perf-compromises:
+  WriteTo("/sys/devices/system/cpu/cpu3/cpufreq/scaling_governor",
+          "performance");
   return true;
+}
+
+static uint32_t JitterAllowanceMicroseconds() {
+  // If this is a Raspberry Pi with more than one core, we add a bit of
+  // additional overhead measured up to the 99.999%-ile: we can allow to burn
+  // a bit more busy-wait CPU cycles to get the timing accurate as we have
+  // more CPU to spare.
+  switch (GetPiModel()) {
+  case PI_MODEL_1:
+    return EMPIRICAL_NANOSLEEP_OVERHEAD_US;  // 99.9%-ile
+  case PI_MODEL_2: case PI_MODEL_3:
+    return EMPIRICAL_NANOSLEEP_OVERHEAD_US + 35;  // 99.999%-ile
+  case PI_MODEL_4:
+    return EMPIRICAL_NANOSLEEP_OVERHEAD_US + 10;  // this one is fast.
+  }
+  return EMPIRICAL_NANOSLEEP_OVERHEAD_US;
 }
 
 void Timers::sleep_nanos(long nanos) {
@@ -407,34 +492,41 @@ void Timers::sleep_nanos(long nanos) {
 
   // For larger duration, we use nanosleep() to give the operating system
   // a chance to do something else.
-  // However, these timings have a lot of jitter, so we do a two way
-  // approach: we use nanosleep(), but for some shorter time period so
-  // that we can tolerate some jitter (also, we need at least an offset of
-  // EMPIRICAL_NANOSLEEP_OVERHEAD_US as the nanosleep implementations on RPi
-  // actually have such offset).
-  //
-  // We use the global 1Mhz hardware timer to measure the actual time period
-  // that has passed, and then inch forward for the remaining time with
-  // busy wait.
-  static long kJitterAllowanceNanos = JitterAllowanceMicroseconds() * 1000;
-  if (nanos > kJitterAllowanceNanos + 5000) {
-    const uint32_t before = *s_Timer1Mhz;
-    struct timespec sleep_time
-      = { 0, nanos - kJitterAllowanceNanos };
-    nanosleep(&sleep_time, NULL);
-    const uint32_t after = *s_Timer1Mhz;
-    const long nanoseconds_passed = 1000 * (uint32_t)(after - before);
-    if (nanoseconds_passed > nanos) {
-      return;  // darn, missed it.
-    } else {
-      nanos -= nanoseconds_passed; // remaining time with busy-loop
+
+  // However, these timings have a lot of jitter, so if we have the 1Mhz timer
+  // available, we use that to accurately mesure time spent and do the
+  // remaining time with busy wait. If we don't have the timer available
+  // (not running as root), we just use nanosleep() for larger values.
+
+  if (s_Timer1Mhz) {
+    static long kJitterAllowanceNanos = JitterAllowanceMicroseconds() * 1000;
+    if (nanos > kJitterAllowanceNanos + MINIMUM_NANOSLEEP_TIME_US*1000) {
+      const uint32_t before = *s_Timer1Mhz;
+      struct timespec sleep_time = { 0, nanos - kJitterAllowanceNanos };
+      nanosleep(&sleep_time, NULL);
+      const uint32_t after = *s_Timer1Mhz;
+      const long nanoseconds_passed = 1000 * (uint32_t)(after - before);
+      if (nanoseconds_passed > nanos) {
+        return;  // darn, missed it.
+      } else {
+        nanos -= nanoseconds_passed; // remaining time with busy-loop
+      }
+    }
+  } else {
+    // Not running as root, not having access to 1Mhz timer. Approximate large
+    // durations with nanosleep(); small durations are done with busy wait.
+    if (nanos > (EMPIRICAL_NANOSLEEP_OVERHEAD_US + MINIMUM_NANOSLEEP_TIME_US)*1000) {
+      struct timespec sleep_time
+        = { 0, nanos - EMPIRICAL_NANOSLEEP_OVERHEAD_US*1000 };
+      nanosleep(&sleep_time, NULL);
+      return;
     }
   }
 
-  busy_sleep_impl(nanos);
+  busy_wait_impl(nanos);  // Use model-specific busy-loop for remaining time.
 }
 
-static void sleep_nanos_rpi_1(long nanos) {
+static void busy_wait_nanos_rpi_1(long nanos) {
   if (nanos < 70) return;
   // The following loop is determined empirically on a 700Mhz RPi
   for (uint32_t i = (nanos - 70) >> 2; i != 0; --i) {
@@ -442,10 +534,25 @@ static void sleep_nanos_rpi_1(long nanos) {
   }
 }
 
-static void sleep_nanos_rpi_2(long nanos) {
+static void busy_wait_nanos_rpi_2(long nanos) {
   if (nanos < 20) return;
   // The following loop is determined empirically on a 900Mhz RPi 2
   for (uint32_t i = (nanos - 20) * 100 / 110; i != 0; --i) {
+    asm("");
+  }
+}
+
+static void busy_wait_nanos_rpi_3(long nanos) {
+  if (nanos < 20) return;
+  for (uint32_t i = (nanos - 15) * 100 / 73; i != 0; --i) {
+    asm("");
+  }
+}
+
+static void busy_wait_nanos_rpi_4(long nanos) {
+  if (nanos < 20) return;
+  // Interesting, the Pi4 is _slower_ than the Pi3 ? At least for this busy loop
+  for (uint32_t i = (nanos - 5) * 100 / 132; i != 0; --i) {
     asm("");
   }
 }
@@ -471,20 +578,37 @@ static void print_overshoot_histogram() {
 #endif
 
 // A PinPulser that uses the PWM hardware to create accurate pulses.
-// It only works on GPIO-18 though.
+// It only works on GPIO-12 or 18 though.
 class HardwarePinPulser : public PinPulser {
 public:
-  static bool CanHandle(uint32_t gpio_mask) {
+  static bool CanHandle(gpio_bits_t gpio_mask) {
 #ifdef DISABLE_HARDWARE_PULSES
     return false;
 #else
-    return gpio_mask == (1 << 18) || gpio_mask == (1 << 12);
+    const bool can_handle = gpio_mask==GPIO_BIT(18) || gpio_mask==GPIO_BIT(12);
+    if (can_handle && (s_PWM_registers == NULL || s_CLK_registers == NULL)) {
+      // Instead of silently not using the hardware pin pulser and falling back
+      // to timing based loops, complain loudly and request the user to make
+      // a choice before continuing.
+      fprintf(stderr, "Need root. You are configured to use the hardware pulse "
+              "generator "
+              "for\n\tsmooth color rendering, however the necessary hardware\n"
+              "\tregisters can't be accessed because you probably don't run\n"
+              "\twith root permissions or privileges have been dropped.\n"
+              "\tSo you either have to run as root (e.g. using sudo) or\n"
+              "\tsupply the --led-no-hardware-pulse command-line flag.\n\n"
+              "\tExiting; run as root or with --led-no-hardware-pulse\n\n");
+      exit(1);
+    }
+    return can_handle;
 #endif
   }
 
-  HardwarePinPulser(uint32_t pins, const std::vector<int> &specs)
+  HardwarePinPulser(gpio_bits_t pins, const std::vector<int> &specs)
     : triggered_(false) {
     assert(CanHandle(pins));
+    assert(s_CLK_registers && s_PWM_registers && s_Timer1Mhz);
+
 #if DEBUG_SLEEP_JITTER
     atexit(print_overshoot_histogram);
 #endif
@@ -504,18 +628,17 @@ public:
 
     for (size_t i = 0; i < specs.size(); ++i) {
       // Hints how long to nanosleep, already corrected for system overhead.
-      sleep_hints_.push_back(specs[i] / 1000 - JitterAllowanceMicroseconds());
+      sleep_hints_us_.push_back(specs[i]/1000 - JitterAllowanceMicroseconds());
     }
 
     const int base = specs[0];
     // Get relevant registers
     fifo_ = s_PWM_registers + PWM_FIFO;
-    assert((s_CLK_registers != NULL) && (s_PWM_registers != NULL));
 
-    if (pins == (1<<18)) {
+    if (pins == GPIO_BIT(18)) {
       // set GPIO 18 to PWM0 mode (Alternative 5)
       SetGPIOMode(s_GPIO_registers, 18, 2);
-    } else if (pins == (1<<12)) {
+    } else if (pins == GPIO_BIT(12)) {
       // set GPIO 12 to PWM0 mode (Alternative 0)
       SetGPIOMode(s_GPIO_registers, 12, 4);
     } else {
@@ -566,7 +689,7 @@ public:
      */
     *fifo_ = 0;
 
-    sleep_hint_ = sleep_hints_[c];
+    sleep_hint_us_ = sleep_hints_us_[c];
     start_time_ = *s_Timer1Mhz;
     triggered_ = true;
     s_PWM_registers[PWM_CTL] = PWM_CTL_USEF1 | PWM_CTL_PWEN1 | PWM_CTL_POLA1;
@@ -579,21 +702,22 @@ public:
     //
     // TODO(hzeller): find if it is possible to get some sort of interrupt from
     //   the hardware once it is done with the pulse. Sounds silly that there is
-    //   not.
-    if (sleep_hint_ > 0) {
+    //   not (so far, only tested GPIO interrupt with a feedback line, but that
+    //   is super-slow with 20μs overhead).
+    if (sleep_hint_us_ > 0) {
       const uint32_t already_elapsed_usec = *s_Timer1Mhz - start_time_;
-      const int to_sleep = sleep_hint_ - already_elapsed_usec;
-      if (to_sleep > 0) {
-        struct timespec sleep_time = { 0, 1000 * to_sleep };
+      const int to_sleep_us = sleep_hint_us_ - already_elapsed_usec;
+      if (to_sleep_us > 0) {
+        struct timespec sleep_time = { 0, 1000 * to_sleep_us };
         nanosleep(&sleep_time, NULL);
 
 #if DEBUG_SLEEP_JITTER
         {
           // Record histogram of realtime jitter how much longer we actually
           // took.
-          const int total_us = *timer1Mhz - start_time_;
-          const int nanoslept = total_us - already_elapsed_usec;
-          int overshoot = nanoslept - (to_sleep + JitterAllowanceMicroseconds());
+          const int total_us = *s_Timer1Mhz - start_time_;
+          const int nanoslept_us = total_us - already_elapsed_usec;
+          int overshoot = nanoslept_us - (to_sleep_us + JitterAllowanceMicroseconds());
           if (overshoot < 0) overshoot = 0;
           if (overshoot > 255) overshoot = 255;
           overshoot_histogram_us[overshoot]++;
@@ -638,17 +762,17 @@ private:
 
 private:
   std::vector<uint32_t> pwm_range_;
-  std::vector<int> sleep_hints_;
+  std::vector<int> sleep_hints_us_;
   volatile uint32_t *fifo_;
   uint32_t start_time_;
-  int sleep_hint_;
+  int sleep_hint_us_;
   bool triggered_;
 };
 
 } // end anonymous namespace
 
 // Public PinPulser factory
-PinPulser *PinPulser::Create(GPIO *io, uint32_t gpio_mask,
+PinPulser *PinPulser::Create(GPIO *io, gpio_bits_t gpio_mask,
                              bool allow_hardware_pulsing,
                              const std::vector<int> &nano_wait_spec) {
   if (!Timers::Init()) return NULL;
@@ -659,8 +783,17 @@ PinPulser *PinPulser::Create(GPIO *io, uint32_t gpio_mask,
   }
 }
 
+// For external use, e.g. in the matrix for extra time.
 uint32_t GetMicrosecondCounter() {
-  return s_Timer1Mhz ? *s_Timer1Mhz : 0;
+  if (s_Timer1Mhz) return *s_Timer1Mhz;
+
+  // When run as non-root, we can't read the timer. Fall back to slow
+  // operating-system ways.
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  const uint64_t micros = ts.tv_nsec / 1000;
+  const uint64_t epoch_usec = (uint64_t)ts.tv_sec * 1000000 + micros;
+  return epoch_usec & 0xFFFFFFFF;
 }
 
 } // namespace rgb_matrix
